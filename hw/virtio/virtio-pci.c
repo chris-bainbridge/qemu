@@ -2197,6 +2197,28 @@ static void virtio_pci_device_unplugged(DeviceState *d)
     }
 }
 
+static int virtio_pci_pm_cap_init(VirtIOPCIProxy *proxy, PCIDevice *pci_dev,
+                                  Error **errp)
+{
+    int pos = pci_pm_init(pci_dev, 0, errp);
+
+    if (pos < 0) {
+        return pos;
+    }
+
+    pci_set_word(pci_dev->config + pos + PCI_PM_PMC, PCI_PM_CAP_VER_1_2);
+
+    if (proxy->flags & VIRTIO_PCI_FLAG_PM_NO_SOFT_RESET) {
+        pci_set_word(pci_dev->config + pos + PCI_PM_CTRL,
+                     PCI_PM_CTRL_NO_SOFT_RESET);
+    }
+
+    pci_set_word(pci_dev->wmask + pos + PCI_PM_CTRL,
+                 PCI_PM_CTRL_STATE_MASK);
+
+    return pos;
+}
+
 static void virtio_pci_realize(PCIDevice *pci_dev, Error **errp)
 {
     VirtIOPCIProxy *proxy = VIRTIO_PCI(pci_dev);
@@ -2271,16 +2293,10 @@ static void virtio_pci_realize(PCIDevice *pci_dev, Error **errp)
         pos = pcie_endpoint_cap_init(pci_dev, 0);
         assert(pos > 0);
 
-        pos = pci_pm_init(pci_dev, 0, errp);
+        pos = virtio_pci_pm_cap_init(proxy, pci_dev, errp);
         if (pos < 0) {
             return;
         }
-
-        /*
-         * Indicates that this function complies with revision 1.2 of the
-         * PCI Power Management Interface Specification.
-         */
-        pci_set_word(pci_dev->config + pos + PCI_PM_PMC, 0x3);
 
         if (proxy->flags & VIRTIO_PCI_FLAG_AER) {
             pcie_aer_init(pci_dev, PCI_ERR_VER, proxy->last_pcie_cap_offset,
@@ -2293,15 +2309,6 @@ static void virtio_pci_realize(PCIDevice *pci_dev, Error **errp)
 
         /* Init Link Control Register */
         pcie_cap_lnkctl_init(pci_dev);
-
-        if (proxy->flags & VIRTIO_PCI_FLAG_PM_NO_SOFT_RESET) {
-            pci_set_word(pci_dev->config + pos + PCI_PM_CTRL,
-                         PCI_PM_CTRL_NO_SOFT_RESET);
-        }
-
-        /* Init Power Management Control Register */
-        pci_set_word(pci_dev->wmask + pos + PCI_PM_CTRL,
-                     PCI_PM_CTRL_STATE_MASK);
 
         if (proxy->flags & VIRTIO_PCI_FLAG_ATS) {
             pcie_ats_init(pci_dev, proxy->last_pcie_cap_offset,
@@ -2319,6 +2326,10 @@ static void virtio_pci_realize(PCIDevice *pci_dev, Error **errp)
          * and pci_config_size() return PCI_CONFIG_SPACE_SIZE.
          */
         pci_dev->cap_present &= ~QEMU_PCI_CAP_EXPRESS;
+        if (proxy->flags & VIRTIO_PCI_FLAG_PM_NO_SOFT_RESET &&
+            virtio_pci_pm_cap_init(proxy, pci_dev, errp) < 0) {
+            return;
+        }
     }
 
     virtio_pci_bus_new(&proxy->bus, sizeof(proxy->bus), proxy);
@@ -2371,7 +2382,7 @@ static bool virtio_pci_no_soft_reset(PCIDevice *dev)
 {
     uint16_t pmcsr;
 
-    if (!pci_is_express(dev) || !(dev->cap_present & QEMU_PCI_CAP_PM)) {
+    if (!(dev->cap_present & QEMU_PCI_CAP_PM)) {
         return false;
     }
 
@@ -2417,7 +2428,7 @@ static const Property virtio_pci_properties[] = {
     DEFINE_PROP_BIT("x-ats-page-aligned", VirtIOPCIProxy, flags,
                     VIRTIO_PCI_FLAG_ATS_PAGE_ALIGNED_BIT, true),
     DEFINE_PROP_BIT("x-pcie-pm-no-soft-reset", VirtIOPCIProxy, flags,
-                    VIRTIO_PCI_FLAG_PM_NO_SOFT_RESET_BIT, false),
+                    VIRTIO_PCI_FLAG_PM_NO_SOFT_RESET_BIT, true),
     DEFINE_PROP_BIT("x-pcie-flr-init", VirtIOPCIProxy, flags,
                     VIRTIO_PCI_FLAG_INIT_FLR_BIT, true),
     DEFINE_PROP_BIT("aer", VirtIOPCIProxy, flags,
